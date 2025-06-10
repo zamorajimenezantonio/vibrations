@@ -1,0 +1,13 @@
+# ANSYS files
+*.wbpz
+
+# CSV
+*.csv
+
+# Matlab outputs
+A.mat
+B.mat
+C.mat
+
+# large input files
+*.spm
