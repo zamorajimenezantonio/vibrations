@@ -109,6 +109,50 @@ C_matrix = np.reshape(C_matrix,(3*n_outputs,2*n_modes))
 # C_matrix should be reduced to (row,col) = n_outputs, 2*n_modes
 C_matrix = C_matrix[0:n_outputs,:]
 
+#%% number of modes and mode simplification:
+truncated_frequency = 70 #Hz
+A_matrix21=A_matrix[int(len(A_matrix)/2):int(len(A_matrix)),0:int(len(A_matrix)/2)]
+A_freq = np.pow(-np.diag(A_matrix21),0.5)/(2*np.pi)
+filter_indexes = np.where(A_freq>truncated_frequency)
+A_freq_truncated = A_freq[0:(filter_indexes[0])[0]]
+
+# truncated model:
+
+# A matrix truncation:
+# 1st, A matrix is divided by nmodes x nmodes shape submatrices.
+A_matrix11 = A_matrix[0:int(len(A_matrix)/2),0:int(len(A_matrix)/2)]
+A_matrix12 = A_matrix[0:int(len(A_matrix)/2),int(len(A_matrix)/2):int(len(A_matrix))]
+A_matrix21 = A_matrix[int(len(A_matrix)/2):int(len(A_matrix)),0:int(len(A_matrix)/2)]
+A_matrix22 = A_matrix[int(len(A_matrix)/2):int(len(A_matrix)),int(len(A_matrix)/2):int(len(A_matrix))]
+# then, the submatrices are truncated:
+A_matrix11 = A_matrix11[0:(filter_indexes[0])[0],0:(filter_indexes[0])[0]]
+A_matrix12 = A_matrix12[0:(filter_indexes[0])[0],0:(filter_indexes[0])[0]]
+A_matrix21 = A_matrix21[0:(filter_indexes[0])[0],0:(filter_indexes[0])[0]]
+A_matrix22 = A_matrix22[0:(filter_indexes[0])[0],0:(filter_indexes[0])[0]]
+# finally, A matrix is built by concatenation:
+A_matrix=np.concatenate((
+    np.concatenate((A_matrix11,A_matrix12),axis=1),
+    np.concatenate((A_matrix21,A_matrix22),axis=1)),axis=0)
+
+# B matrix truncation:
+# 1st. B matrix is subdivided:
+B_matrix11 = B_matrix[0:int(len(B_matrix)/2)]
+B_matrix12 = B_matrix[int(len(B_matrix)/2):int(len(B_matrix))]
+# then, the submatrices are truncated:
+B_matrix11 = B_matrix11[0:(filter_indexes[0])[0]]
+B_matrix12 = B_matrix12[0:(filter_indexes[0])[0]]
+# finally, B matrix is built by concatenation:
+B_matrix=np.concatenate((B_matrix11,B_matrix12),axis=0)
+
+# C matrix truncation:
+# 1st. C matrix is subdivided:
+C_matrix11 = C_matrix[:,0:int(len(np.transpose(C_matrix))/2)]
+C_matrix21 = C_matrix[:,int(len(np.transpose(C_matrix))/2):int(len(np.transpose(C_matrix)))]
+# then, the submatrices are truncated:
+C_matrix11 = C_matrix11[:,0:(filter_indexes[0])[0]]
+C_matrix21 = C_matrix21[:,0:(filter_indexes[0])[0]]
+# finally, B matrix is built by concatenation:
+C_matrix=np.concatenate((C_matrix11,C_matrix21),axis=1)
 
 #%% ===============================================
 #   =============CALCULATING BODE==================
@@ -120,27 +164,34 @@ import scipy.io as io
 import matplotlib.pyplot as plt
 
 # discretized frequency array:
-w0 = 0 # rad/s
-finc = 0.1 # Hz
-winc = finc*2*np.pi # rad/s
-fend = 150 # Hz
+
+f0 = 1 # Hz
+w0 = f0/(2*np.pi) # rad/s
+#fend = 70 # Hz
+fend = truncated_frequency
 wend = 2*np.pi*fend # rad/s
 
+finc = 0.01 # Hz
+n=np.log((fend-f0)/finc)/np.log(2)
+n=int(n)
+
 # creating a bode container (row for inputs and columns for outputs)
+n_inputs = len(input_labels)
+n_outputs = len(output_labels)
 bode_matrix=np.ndarray(shape=(n_inputs,n_outputs),dtype=object)
 
 # row for-loop for each one of the inputs
 first_input=input_labels.index(input_labels[0])
-last_input=input_labels.index(input_labels[1])
+last_input=input_labels.index(input_labels[5])
 first_output=output_labels.index(output_labels[0])
-last_output=output_labels.index(output_labels[-1])
+last_output=output_labels.index(output_labels[0])
 
 n_inputs=np.linspace(first_input,last_input,1+last_input-first_input).astype(int)
 n_outputs=np.linspace(first_output,last_output,1+last_output-first_output).astype(int)
 
 
 def matlab_SISO_bode(input, output, input_labels, output_labels, A_matrix, B_matrix, C_matrix,
-                     w0, winc, wend, bode_matrix):
+                     w0, wend, n, matlabcores, bode_matrix):
 
     print(f"Generating {output_labels[output]} output due to {input_labels[input]} input...")
     # Selection of input and output to calculate H(s):
@@ -170,7 +221,7 @@ def matlab_SISO_bode(input, output, input_labels, output_labels, A_matrix, B_mat
         io.savemat(f"{A}_{input}_{output}.mat", {A: dict_reduced_matrix[f"{A}_matrix"]})
 
 
-    matlab_command = f"matlab -nodisplay -nosplash -nodesktop -r -wait [f,mag]=calculateBode({w0},{winc},{wend},{input},{output});exit"
+    matlab_command = f"matlab -nodisplay -nosplash -nojvm -minimize -r -wait [f,mag]=calculateBode({w0},{wend},{n},{input},{output},{matlabcores});exit"
     res= subprocess.call(matlab_command, shell=True)
 
     bode_data = np.loadtxt(f"bode_data_{input}_{output}.csv",delimiter=',')
@@ -182,12 +233,13 @@ def matlab_SISO_bode(input, output, input_labels, output_labels, A_matrix, B_mat
 # Parallelize:
 from joblib import Parallel, delayed
 
-parallel_obj = Parallel(n_jobs=4)
-my_result = parallel_obj(delayed(matlab_SISO_bode)(input, output, 
-                              input_labels, output_labels,
-                              A_matrix, B_matrix, C_matrix,
-                              w0, winc, wend,
-                              bode_matrix) for input in [0,1] for output in [0,1])
+parallel_obj = Parallel(n_jobs=6, prefer='threads')
+my_result = parallel_obj(delayed(matlab_SISO_bode)(input, output, input_labels, output_labels,
+                                                   A_matrix, B_matrix, C_matrix,
+                                                   w0, wend, n, 
+                                                   matlabcores=1, 
+                                                   bode_matrix=bode_matrix) 
+                                                   for input in n_inputs for output in n_outputs)
 
 for elem in my_result:
     for row in range(len(input_labels)):
@@ -198,7 +250,7 @@ for elem in my_result:
             except:
                 pass
 
-bode_matrix = my_result        
+bode_matrix = np.sum(my_result,keepdims=True)[0]
 
 plt.title(input_labels[0])
 plt.xlim([1,150])
